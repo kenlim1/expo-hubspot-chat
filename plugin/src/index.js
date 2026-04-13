@@ -219,7 +219,8 @@ function withHubspotIosPlist(config, props) {
 </dict>
 </plist>`;
 
-      fs.writeFileSync(path.join(iosDir, 'Hubspot-Info.plist'), plistContent);
+      const appName = config.modRequest.projectName || config.name;
+      fs.writeFileSync(path.join(iosDir, appName, 'Hubspot-Info.plist'), plistContent);
 
       return config;
     },
@@ -232,18 +233,58 @@ function withHubspotIosPlistResource(config) {
     const xcodeProject = config.modResults;
     const appName = config.modRequest.projectName || config.name;
     const plistPath = 'Hubspot-Info.plist';
-    const group =
-      xcodeProject.findPBXGroupKey({ name: appName }) ||
-      xcodeProject.findPBXGroupKey({ path: appName });
 
-    if (group) {
-      const existingFile = xcodeProject.hasFile(plistPath);
-      if (!existingFile) {
-        xcodeProject.addResourceFile(
-          plistPath,
-          { target: xcodeProject.getFirstTarget().uuid },
-          group,
-        );
+    // Check if already added to the project
+    const hasFile = Object.values(xcodeProject.pbxFileReferenceSection()).some(
+      (ref) => ref && ref.path === `${appName}/${plistPath}`,
+    );
+
+    if (!hasFile) {
+      // Manually add file reference, build file, and resource build phase entry.
+      // addResourceFile fails when the Xcode project has no "Resources" group,
+      // which is typical for Expo-managed projects.
+      const fileRefUuid = xcodeProject.generateUuid();
+      const buildFileUuid = xcodeProject.generateUuid();
+      const target = xcodeProject.getFirstTarget().uuid;
+
+      xcodeProject.pbxFileReferenceSection()[fileRefUuid] = {
+        isa: 'PBXFileReference',
+        lastKnownFileType: 'text.plist.xml',
+        name: plistPath,
+        path: `${appName}/${plistPath}`,
+        sourceTree: '"<group>"',
+      };
+      xcodeProject.pbxFileReferenceSection()[`${fileRefUuid}_comment`] =
+        plistPath;
+
+      xcodeProject.pbxBuildFileSection()[buildFileUuid] = {
+        isa: 'PBXBuildFile',
+        fileRef: fileRefUuid,
+        fileRef_comment: plistPath,
+      };
+      xcodeProject.pbxBuildFileSection()[`${buildFileUuid}_comment`] =
+        `${plistPath} in Resources`;
+
+      const resourcesBuildPhase =
+        xcodeProject.pbxResourcesBuildPhaseObj(target);
+      if (resourcesBuildPhase) {
+        resourcesBuildPhase.files.push({
+          value: buildFileUuid,
+          comment: `${plistPath} in Resources`,
+        });
+      }
+
+      const mainGroupId =
+        xcodeProject.pbxProjectSection()[xcodeProject.getFirstProject().uuid]
+          .mainGroup;
+      const mainGroup =
+        xcodeProject.pbxGroupByName(appName) ||
+        xcodeProject.getPBXGroupByKey(mainGroupId);
+      if (mainGroup && mainGroup.children) {
+        mainGroup.children.push({
+          value: fileRefUuid,
+          comment: plistPath,
+        });
       }
     }
 
@@ -269,11 +310,11 @@ const withHubspotChat = (config, props = {}) => {
 
   if (
     props.environment &&
-    props.environment !== 'production' &&
+    props.environment !== 'prod' &&
     props.environment !== 'qa'
   ) {
     console.warn(
-      `[expo-hubspot-chat] Invalid environment "${props.environment}". Expected "production" or "qa". Defaulting to "production".`,
+      `[expo-hubspot-chat] Invalid environment "${props.environment}". Expected "prod" or "qa". Defaulting to "prod".`,
     );
   }
 
