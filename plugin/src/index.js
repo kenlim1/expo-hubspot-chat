@@ -27,6 +27,7 @@ const path = require('path');
 function withHubspotAndroid(config, props) {
   config = withHubspotAndroidAssets(config, props);
   config = withHubspotAndroidManifest(config);
+  config = withHubspotAndroidStyles(config);
   config = withHubspotAndroidPackaging(config);
   return config;
 }
@@ -100,9 +101,9 @@ function withHubspotAndroidManifest(config) {
       mainApplication.activity.push({
         $: {
           'android:name': 'com.hubspot.mobilesdk.HubspotWebActivity',
-          'android:theme': '@style/Theme.AppCompat.Light.NoActionBar',
+          'android:theme': '@style/Theme.HubspotTheme',
           'android:exported': 'false',
-          'tools:replace': 'android:exported',
+          'tools:replace': 'android:exported,android:theme',
         },
       });
     }
@@ -140,6 +141,85 @@ function withHubspotAndroidManifest(config) {
 
     return config;
   });
+}
+
+/**
+ * Patches values/styles.xml and values-night/styles.xml to add a custom theme
+ * for HubspotWebActivity that controls status bar icon appearance.
+ *
+ * - Light mode (values/styles.xml): windowLightStatusBar = true (dark icons)
+ * - Dark mode (values-night/styles.xml): windowLightStatusBar = false (light icons)
+ *
+ * @param {ExportedConfig} config
+ */
+function withHubspotAndroidStyles(config) {
+  return withDangerousMod(config, [
+    'android',
+    async (config) => {
+      const resDir = path.join(
+        config.modRequest.platformProjectRoot,
+        'app',
+        'src',
+        'main',
+        'res',
+      );
+
+      const styleName = 'Theme.HubspotTheme';
+      const parentTheme = 'Theme.AppCompat.Light.NoActionBar';
+
+      const configs = [
+        {
+          dir: path.join(resDir, 'values'),
+          windowLightStatusBar: 'true',
+        },
+        {
+          dir: path.join(resDir, 'values-night'),
+          windowLightStatusBar: 'false',
+        },
+      ];
+
+      const styleBlock = (lightStatusBar) =>
+        `    <style name="${styleName}" parent="${parentTheme}">\n` +
+        `        <item name="android:windowLightStatusBar">${lightStatusBar}</item>\n` +
+        `    </style>`;
+
+      for (const { dir, windowLightStatusBar } of configs) {
+        const stylesPath = path.join(dir, 'styles.xml');
+
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+
+        if (fs.existsSync(stylesPath)) {
+          let contents = fs.readFileSync(stylesPath, 'utf-8');
+
+          // Skip if the style already exists
+          if (contents.includes(`name="${styleName}"`)) {
+            continue;
+          }
+
+          // Insert before closing </resources> tag
+          contents = contents.replace(
+            '</resources>',
+            `${styleBlock(windowLightStatusBar)}\n</resources>`,
+          );
+
+          fs.writeFileSync(stylesPath, contents);
+        } else {
+          // Create a new styles.xml with the theme
+          const newStyles =
+            '<?xml version="1.0" encoding="utf-8"?>\n' +
+            '<resources>\n' +
+            `${styleBlock(windowLightStatusBar)}\n` +
+            '</resources>\n';
+
+          fs.writeFileSync(stylesPath, newStyles);
+        }
+      }
+
+      return config;
+    },
+  ]);
 }
 
 /** @param {ExportedConfig} config */
