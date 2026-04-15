@@ -11,8 +11,5 @@ class HubspotChatMessagingService : HubspotFirebaseMessagingService() {
   }
 
   override fun onMessageReceived(message: RemoteMessage) {
-    if (HubspotManager.isHubspotNotification(message.data)) {
-      super.onMessageReceived(message)
-    }
   }
 }
