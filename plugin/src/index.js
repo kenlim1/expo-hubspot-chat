@@ -27,6 +27,7 @@ const path = require('path');
 function withHubspotAndroid(config, props) {
   config = withHubspotAndroidAssets(config, props);
   config = withHubspotAndroidManifest(config);
+  config = withHubspotAndroidStyles(config);
   config = withHubspotAndroidPackaging(config);
   return config;
 }
@@ -100,9 +101,9 @@ function withHubspotAndroidManifest(config) {
       mainApplication.activity.push({
         $: {
           'android:name': 'com.hubspot.mobilesdk.HubspotWebActivity',
-          'android:theme': '@style/Theme.AppCompat.Light.NoActionBar',
+          'android:theme': '@style/Theme.HubspotTheme',
           'android:exported': 'false',
-          'tools:replace': 'android:exported',
+          'tools:replace': 'android:exported,android:theme',
         },
       });
     }
@@ -140,6 +141,85 @@ function withHubspotAndroidManifest(config) {
 
     return config;
   });
+}
+
+/**
+ * Patches values/styles.xml and values-night/styles.xml to add a custom theme
+ * for HubspotWebActivity that controls status bar icon appearance.
+ *
+ * - Light mode (values/styles.xml): windowLightStatusBar = true (dark icons)
+ * - Dark mode (values-night/styles.xml): windowLightStatusBar = false (light icons)
+ *
+ * @param {ExportedConfig} config
+ */
+function withHubspotAndroidStyles(config) {
+  return withDangerousMod(config, [
+    'android',
+    async (config) => {
+      const resDir = path.join(
+        config.modRequest.platformProjectRoot,
+        'app',
+        'src',
+        'main',
+        'res',
+      );
+
+      const styleName = 'Theme.HubspotTheme';
+      const parentTheme = 'Theme.AppCompat.DayNight.NoActionBar';
+
+      const configs = [
+        {
+          dir: path.join(resDir, 'values'),
+          windowLightStatusBar: 'true',
+        },
+        {
+          dir: path.join(resDir, 'values-night'),
+          windowLightStatusBar: 'false',
+        },
+      ];
+
+      const styleBlock = (lightStatusBar) =>
+        `    <style name="${styleName}" parent="${parentTheme}">\n` +
+        `        <item name="android:windowLightStatusBar">${lightStatusBar}</item>\n` +
+        `    </style>`;
+
+      for (const { dir, windowLightStatusBar } of configs) {
+        const stylesPath = path.join(dir, 'styles.xml');
+
+        if (!fs.existsSync(dir)) {
+          fs.mkdirSync(dir, { recursive: true });
+        }
+
+        if (fs.existsSync(stylesPath)) {
+          let contents = fs.readFileSync(stylesPath, 'utf-8');
+
+          // Skip if the style already exists
+          if (contents.includes(`name="${styleName}"`)) {
+            continue;
+          }
+
+          // Insert before closing </resources> tag
+          contents = contents.replace(
+            '</resources>',
+            `${styleBlock(windowLightStatusBar)}\n</resources>`,
+          );
+
+          fs.writeFileSync(stylesPath, contents);
+        } else {
+          // Create a new styles.xml with the theme
+          const newStyles =
+            '<?xml version="1.0" encoding="utf-8"?>\n' +
+            '<resources>\n' +
+            `${styleBlock(windowLightStatusBar)}\n` +
+            '</resources>\n';
+
+          fs.writeFileSync(stylesPath, newStyles);
+        }
+      }
+
+      return config;
+    },
+  ]);
 }
 
 /** @param {ExportedConfig} config */
@@ -219,7 +299,8 @@ function withHubspotIosPlist(config, props) {
 </dict>
 </plist>`;
 
-      fs.writeFileSync(path.join(iosDir, 'Hubspot-Info.plist'), plistContent);
+      const appName = config.modRequest.projectName || config.name;
+      fs.writeFileSync(path.join(iosDir, appName, 'Hubspot-Info.plist'), plistContent);
 
       return config;
     },
@@ -232,18 +313,58 @@ function withHubspotIosPlistResource(config) {
     const xcodeProject = config.modResults;
     const appName = config.modRequest.projectName || config.name;
     const plistPath = 'Hubspot-Info.plist';
-    const group =
-      xcodeProject.findPBXGroupKey({ name: appName }) ||
-      xcodeProject.findPBXGroupKey({ path: appName });
 
-    if (group) {
-      const existingFile = xcodeProject.hasFile(plistPath);
-      if (!existingFile) {
-        xcodeProject.addResourceFile(
-          plistPath,
-          { target: xcodeProject.getFirstTarget().uuid },
-          group,
-        );
+    // Check if already added to the project
+    const hasFile = Object.values(xcodeProject.pbxFileReferenceSection()).some(
+      (ref) => ref && ref.path === `${appName}/${plistPath}`,
+    );
+
+    if (!hasFile) {
+      // Manually add file reference, build file, and resource build phase entry.
+      // addResourceFile fails when the Xcode project has no "Resources" group,
+      // which is typical for Expo-managed projects.
+      const fileRefUuid = xcodeProject.generateUuid();
+      const buildFileUuid = xcodeProject.generateUuid();
+      const target = xcodeProject.getFirstTarget().uuid;
+
+      xcodeProject.pbxFileReferenceSection()[fileRefUuid] = {
+        isa: 'PBXFileReference',
+        lastKnownFileType: 'text.plist.xml',
+        name: plistPath,
+        path: `${appName}/${plistPath}`,
+        sourceTree: '"<group>"',
+      };
+      xcodeProject.pbxFileReferenceSection()[`${fileRefUuid}_comment`] =
+        plistPath;
+
+      xcodeProject.pbxBuildFileSection()[buildFileUuid] = {
+        isa: 'PBXBuildFile',
+        fileRef: fileRefUuid,
+        fileRef_comment: plistPath,
+      };
+      xcodeProject.pbxBuildFileSection()[`${buildFileUuid}_comment`] =
+        `${plistPath} in Resources`;
+
+      const resourcesBuildPhase =
+        xcodeProject.pbxResourcesBuildPhaseObj(target);
+      if (resourcesBuildPhase) {
+        resourcesBuildPhase.files.push({
+          value: buildFileUuid,
+          comment: `${plistPath} in Resources`,
+        });
+      }
+
+      const mainGroupId =
+        xcodeProject.pbxProjectSection()[xcodeProject.getFirstProject().uuid]
+          .mainGroup;
+      const mainGroup =
+        xcodeProject.pbxGroupByName(appName) ||
+        xcodeProject.getPBXGroupByKey(mainGroupId);
+      if (mainGroup && mainGroup.children) {
+        mainGroup.children.push({
+          value: fileRefUuid,
+          comment: plistPath,
+        });
       }
     }
 
@@ -269,11 +390,11 @@ const withHubspotChat = (config, props = {}) => {
 
   if (
     props.environment &&
-    props.environment !== 'production' &&
+    props.environment !== 'prod' &&
     props.environment !== 'qa'
   ) {
     console.warn(
-      `[expo-hubspot-chat] Invalid environment "${props.environment}". Expected "production" or "qa". Defaulting to "production".`,
+      `[expo-hubspot-chat] Invalid environment "${props.environment}". Expected "prod" or "qa". Defaulting to "prod".`,
     );
   }
 
